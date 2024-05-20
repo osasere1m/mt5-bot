@@ -12,7 +12,7 @@ print("MetaTrader5 package author: ",mt5.__author__)
 print("MetaTrader5 package version: ",mt5.__version__)
  
 # establish MetaTrader 5 connection to a specified trading account
-if not mt5.initialize():
+if not mt5.initialize(login=5025221475, server="MetaQuotes-Demo",password="HmOrF!U6"):
     print("initialize() failed, error code =",mt5.last_error())
     quit()
  
@@ -66,7 +66,7 @@ def bot():
         
         # Check if there is an open trade position
         check_positions = len(mt5.positions_get()) ==0
-        -
+        
         
         # get open positions on EURUSD
         positions=mt5.positions_get(symbol="EURUSD")
@@ -75,7 +75,7 @@ def bot():
             # Step 6: Implement the trading strategy
             for i, row in df.iterrows():
                 # Step 7: Check for signals and execute trades
-                if df['long_condition'].iloc[-1] > 0:
+                if df['long_condition'].iloc[-1] ==2:
                     
                     #trade parameter
                     point = mt5.symbol_info(symbol).point
@@ -87,8 +87,8 @@ def bot():
 
                     buy_order_type = mt5.ORDER_TYPE_BUY 
                     sell_order_type = mt5.ORDER_TYPE_SELL 
-                    tp_point = 1577
-                    sl_point = 764
+                    tp_point = 300
+                    sl_point = 150
                     
                     #create order
                     request = {
@@ -112,7 +112,7 @@ def bot():
                     time.sleep(21600)
                     break
                 
-                elif df['short_condition'].iloc[-1] > 1:
+                elif df['short_condition'].iloc[-1] == 2:
                     request = {
                         "action": mt5.TRADE_ACTION_DEAL,
                         "symbol": symbol,
