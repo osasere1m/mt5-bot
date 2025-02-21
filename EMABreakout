@@ -1,1 +1,175 @@
+//+------------------------------------------------------------------+
+//|                                                  EMAStrategy.mq5 |
+//|                        Copyright 2023, MetaQuotes Software Corp. |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2023, MetaQuotes Software Corp."
+#property link      "https://www.mql5.com"
+#property version   "1.00"
 
+// Input parameters
+input int lotsize = 0.01;         //lot size 
+input int emaPeriod = 10;      // EMA Period
+input int slPoints = 400;      // Stop Loss (points)
+input int tpPoints = 800;      // Take Profit (points)
+
+// Global variables
+int EMA_high_handle;           // Handle for EMA (High)
+int EMA_low_handle;            // Handle for EMA (Low)
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+  if(lotsize <=0 || lotsize>1){
+      Alert("Lots <=0 or >1");
+      return INIT_PARAMETERS_INCORRECT;
+    }
+   // Create EMA handles for High and Low prices
+   EMA_high_handle = iMA(_Symbol, _Period, emaPeriod, 0, MODE_EMA, PRICE_HIGH);
+   EMA_low_handle = iMA(_Symbol, _Period, emaPeriod, 0, MODE_EMA, PRICE_LOW);
+   
+   // Check if EMA handles are created successfully
+   if(EMA_high_handle == INVALID_HANDLE || EMA_low_handle == INVALID_HANDLE)
+     {
+      Print("Failed to create EMA handles");
+      return(INIT_FAILED);
+     }
+     
+   return(INIT_SUCCEEDED);
+  }
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   // Release EMA handles
+   IndicatorRelease(EMA_high_handle);
+   IndicatorRelease(EMA_low_handle);
+  }
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+   // Check for open positions to avoid duplicates
+   if(PositionSelect(_Symbol))
+      return;
+      
+   // Check buy/sell conditions
+   //Check open position
+      
+   int total = PositionsTotal();
+   Print("Total number of open position", total);
+   
+   if(IsBuyCondition() && total <1)
+     {
+      OpenBuyTrade();
+     }
+   else if(IsSellCondition() && total <1)
+     {
+      //OpenSellTrade();
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Check if Buy Condition is met                                    |
+//+------------------------------------------------------------------+
+bool IsBuyCondition()
+  {
+   double emaHighBuffer[2], emaLowBuffer[2];
+   
+   // Copy EMA values for the last two closed candles
+   if(CopyBuffer(EMA_high_handle, 0, 1, 2, emaHighBuffer) != 2) return false;
+   if(CopyBuffer(EMA_low_handle, 0, 1, 2, emaLowBuffer) != 2) return false;
+   
+   // Get closing prices of the two candles
+   double close_1 = iClose(_Symbol, _Period, 1);
+   double close_2 = iClose(_Symbol, _Period, 2);
+   
+   // Buy condition logic:
+   // 1. First candle (older) closes above both EMAs
+   // 2. Second candle (newer) closes below EMA High but above EMA Low
+   bool condition1 = (close_2 < emaHighBuffer[1]) && (close_2 > emaLowBuffer[1]);
+   bool condition2 = (close_1 > emaHighBuffer[0]) && (close_1 > emaLowBuffer[0]);
+   
+   return (condition1 && condition2);
+  }
+
+//+------------------------------------------------------------------+
+//| Check if Sell Condition is met                                   |
+//+------------------------------------------------------------------+
+bool IsSellCondition()
+  {
+   double emaHighBuffer[2], emaLowBuffer[2];
+   
+   // Copy EMA values for the last two closed candles
+   if(CopyBuffer(EMA_high_handle, 0, 1, 2, emaHighBuffer) != 2) return false;
+   if(CopyBuffer(EMA_low_handle, 0, 1, 2, emaLowBuffer) != 2) return false;
+   
+   // Get closing prices of the two candles
+   double close_1 = iClose(_Symbol, _Period, 1);
+   double close_2 = iClose(_Symbol, _Period, 2);
+   
+   // Sell condition logic:
+   // 1. First candle (older) closes below both EMAs
+   // 2. Second candle (newer) closes below EMA High but above EMA Low
+   bool condition1 = (close_2 < emaHighBuffer[1]) && (close_2 > emaLowBuffer[1]);
+   bool condition2 = (close_1 < emaHighBuffer[0]) && (close_1 < emaLowBuffer[0]);
+   
+   return (condition1 && condition2);
+  }
+
+//+------------------------------------------------------------------+
+//| Open a Buy Trade                                                 |
+//+------------------------------------------------------------------+
+void OpenBuyTrade()
+  {
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = lotsize;
+   request.type = ORDER_TYPE_BUY;
+   request.price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   request.sl = request.price - slPoints * _Point;
+   request.tp = request.price + tpPoints * _Point;
+   request.deviation = 3;
+   request.comment = "Bullish EMA Cross";
+   
+   // Send the trade request
+   if(!OrderSend(request, result))
+     {
+      Print("Buy OrderSend error: ", GetLastError());
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Open a Sell Trade                                                |
+//+------------------------------------------------------------------+
+void OpenSellTrade()
+  {
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = lotsize;
+   request.type = ORDER_TYPE_SELL;
+   request.price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   request.sl = request.price + slPoints * _Point;
+   request.tp = request.price - tpPoints * _Point;
+   request.deviation = 3;
+   request.comment = "Bearish EMA Cross";
+   
+   // Send the trade request
+   if(!OrderSend(request, result))
+     {
+      Print("Sell OrderSend error: ", GetLastError());
+     }
+  }
+//+------------------------------------------------------------------+
