@@ -1,0 +1,247 @@
+//+------------------------------------------------------------------+
+//|                                               DailyHLStrategy.mq5|
+//|                                 Copyright 2023, MetaQuotes Ltd. |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2023, MetaQuotes Ltd."
+#property link      "https://www.mql5.com"
+#property version   "1.03"
+#timeframe 4H
+
+input ulong  MagicNumber = 12345;   // Magic Number
+input double LotSize     = 0.1;     // Lot Size
+input int    TakeProfit  = 8000;     // Take Profit (points)
+input int    FastEMA     = 12;      // MACD Fast EMA Period
+input int    SlowEMA     = 26;      // MACD Slow EMA Period
+input int    SignalPeriod = 9;      // MACD Signal Period
+
+int macdHandle;
+double macdMain[], macdSignal[];
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   // Create MACD handle
+   macdHandle = iMACD(_Symbol, _Period, FastEMA, SlowEMA, SignalPeriod, PRICE_CLOSE);
+   
+   // Set arrays as series
+   ArraySetAsSeries(macdMain, true);
+   ArraySetAsSeries(macdSignal, true);
+   
+   // Draw initial daily high/low lines
+   DrawDailyLines();
+   return(INIT_SUCCEEDED);
+  }
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   // Delete the lines when EA is removed
+   ObjectDelete(0, "PrevDayHigh");
+   ObjectDelete(0, "PrevDayLow");
+   IndicatorRelease(macdHandle);
+  }
+
+//+------------------------------------------------------------------+
+//| Draw or update daily high/low lines                              |
+//+------------------------------------------------------------------+
+void DrawDailyLines()
+  {
+   // Get previous day's high and low
+   double prevHigh = iHigh(_Symbol, PERIOD_D1, 1);
+   double prevLow = iLow(_Symbol, PERIOD_D1, 1);
+   
+   // Create or update high line
+   if(!ObjectCreate(0, "PrevDayHigh", OBJ_HLINE, 0, 0, prevHigh))
+     {
+      ObjectMove(0, "PrevDayHigh", 0, 0, prevHigh);
+     }
+   ObjectSetInteger(0, "PrevDayHigh", OBJPROP_COLOR, clrRed);
+   ObjectSetInteger(0, "PrevDayHigh", OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetInteger(0, "PrevDayHigh", OBJPROP_WIDTH, 1);
+   ObjectSetString(0, "PrevDayHigh", OBJPROP_TEXT, "Prev Day High");
+   
+   // Create or update low line
+   if(!ObjectCreate(0, "PrevDayLow", OBJ_HLINE, 0, 0, prevLow))
+     {
+      ObjectMove(0, "PrevDayLow", 0, 0, prevLow);
+     }
+   ObjectSetInteger(0, "PrevDayLow", OBJPROP_COLOR, clrBlue);
+   ObjectSetInteger(0, "PrevDayLow", OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetInteger(0, "PrevDayLow", OBJPROP_WIDTH, 1);
+   ObjectSetString(0, "PrevDayLow", OBJPROP_TEXT, "Prev Day Low");
+  }
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+   static datetime lastDayChecked = 0;
+   datetime currentDay = TimeCurrent() / 86400 * 86400;
+   
+   // Update lines at the start of each new day
+   if(lastDayChecked != currentDay)
+     {
+      lastDayChecked = currentDay;
+      DrawDailyLines();
+     }
+
+   // Check for minimum number of bars
+   if(Bars(_Symbol, PERIOD_D1) < 2 || Bars(_Symbol, _Period) < SlowEMA + SignalPeriod)
+     {
+      Print("Not enough historical data");
+      return;
+     }
+
+   // Update MACD values
+   CopyBuffer(macdHandle, 0, 0, 2, macdMain);
+   CopyBuffer(macdHandle, 1, 0, 2, macdSignal);
+   
+   // Check for exit conditions first
+   CheckExitConditions();
+   
+   // Check if already traded today
+   string globalVarName = "LastTradeDate_" + string(MagicNumber) + "_" + Symbol();
+   datetime lastTradeDate = GlobalVariableGet(globalVarName);
+   
+   if(lastTradeDate >= currentDay)
+     {
+      Print("Already traded today. Skipping new trades.");
+      return;
+     }
+
+   // Get previous day's high and low for SL/TP
+   double prevHigh = iHigh(_Symbol, PERIOD_D1, 1);
+   double prevLow = iLow(_Symbol, PERIOD_D1, 1);
+   
+   // Get current prices
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   // Check buy condition (with MACD crossover filter)
+   if(ask > prevHigh && !HasOpenPosition() && IsMACDBullish())
+     {
+      double sl = prevLow;  // Buy SL = Previous day low
+      double tp = ask + TakeProfit * _Point;
+      if(OpenTrade(ORDER_TYPE_BUY, ask, sl, tp))
+         GlobalVariableSet(globalVarName, currentDay);
+     }
+     
+   // Check sell condition (with MACD crossunder filter)
+   //if(bid < prevLow && !HasOpenPosition() && IsMACDBearish())
+     {
+      //double sl = prevHigh;  // Sell SL = Previous day high
+      //double tp = bid - TakeProfit * _Point;
+      //if(OpenTrade(ORDER_TYPE_SELL, bid, sl, tp))
+         //GlobalVariableSet(globalVarName, currentDay);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Check if MACD shows bullish crossover                            |
+//+------------------------------------------------------------------+
+bool IsMACDBullish()
+  {
+   return macdMain[0] > macdSignal[0] && macdMain[1] <= macdSignal[1];
+  }
+
+//+------------------------------------------------------------------+
+//| Check if MACD shows bearish crossunder                           |
+//+------------------------------------------------------------------+
+bool IsMACDBearish()
+  {
+   return macdMain[0] < macdSignal[0] && macdMain[1] >= macdSignal[1];
+  }
+
+//+------------------------------------------------------------------+
+//| Check for exit conditions based on MACD                          |
+//+------------------------------------------------------------------+
+void CheckExitConditions()
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+        {
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
+            PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+           {
+            // Check for exit condition on long positions
+            if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY && IsMACDBearish())
+              {
+               ClosePosition(ticket);
+              }
+            // Check for exit condition on short positions
+            else if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL && IsMACDBullish())
+              {
+               ClosePosition(ticket);
+              }
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Close specified position                                         |
+//+------------------------------------------------------------------+
+void ClosePosition(ulong ticket)
+  {
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   
+   request.action = TRADE_ACTION_DEAL;
+   request.position = ticket;
+   request.symbol = PositionGetString(POSITION_SYMBOL);
+   request.volume = PositionGetDouble(POSITION_VOLUME);
+   request.type = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+   request.price = (request.type == ORDER_TYPE_SELL) ? SymbolInfoDouble(request.symbol, SYMBOL_BID) : SymbolInfoDouble(request.symbol, SYMBOL_ASK);
+   request.deviation = 5;
+   
+   if(!OrderSend(request, result))
+     {
+      Print("Failed to close position: ", GetLastError());
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Check if there's any open position                               |
+//+------------------------------------------------------------------+
+bool HasOpenPosition()
+  {
+   return PositionsTotal() > 0;
+  }
+
+//+------------------------------------------------------------------+
+//| Execute trade order                                              |
+//+------------------------------------------------------------------+
+bool OpenTrade(const ENUM_ORDER_TYPE orderType, const double price, const double sl, const double tp)
+  {
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = LotSize;
+   request.type = orderType;
+   request.price = price;
+   request.deviation = 5;
+   request.magic = MagicNumber;
+
+   // Set stop loss and take profit
+   request.sl = NormalizeDouble(sl, _Digits);
+   request.tp = NormalizeDouble(tp, _Digits);
+
+   // Send trade request
+   if(!OrderSend(request, result))
+     {
+      Print("OrderSend failed: ", GetLastError());
+      return false;
+     }
+   return true;
+  }
+//+------------------------------------------------------------------+
