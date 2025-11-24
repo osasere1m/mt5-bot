@@ -1,0 +1,386 @@
+//+------------------------------------------------------------------+
+//|                                                  InsideBarEA.mq5 |
+//|                                                                  |
+//|                                                                  |
+//+------------------------------------------------------------------+
+
+#property copyright ""
+#property version   "1.00"
+#property description "Detects Inside Bars and executes trades based on EMA trend"
+
+// Input parameters
+input color MotherBarHighColor = clrBlue;          // Color for mother bar high line
+input color MotherBarLowColor = clrRed;           // Color for mother bar low line
+input int LineWidth = 2;                          // Width of the lines
+input ENUM_LINE_STYLE LineStyle = STYLE_SOLID;    // Style of the lines
+input bool AlertOnInsideBar = true;               // Show alert when inside bar detected
+input double RiskRewardRatio = 2.0;               // Risk to Reward ratio
+input double LotSize = 0.01;                      // Trade lot size
+input int EMA_Period1 = 20;                       // EMA 20 period
+input int EMA_Period2 = 50;                       // EMA 50 period
+input bool EnableTrading = true;                  // Enable trade execution
+
+// Global variables
+string indicatorName = "InsideBarEA";
+datetime lastBarTime = 0;
+double motherHigh = 0;
+double motherLow = 0;
+bool insideBarDetected = false;
+int emaHandle1, emaHandle2;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    Print("Inside Bar EA initialized");
+    
+    // Create EMA handles
+    emaHandle1 = iMA(_Symbol, _Period, EMA_Period1, 0, MODE_EMA, PRICE_CLOSE);
+    emaHandle2 = iMA(_Symbol, _Period, EMA_Period2, 0, MODE_EMA, PRICE_CLOSE);
+    
+    if(emaHandle1 == INVALID_HANDLE || emaHandle2 == INVALID_HANDLE)
+    {
+        Print("Error creating EMA handles");
+        return(INIT_FAILED);
+    }
+    
+    return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    // Clean up: remove all objects created by this EA
+    ObjectsDeleteAll(0, indicatorName);
+    
+    // Release indicators
+    if(emaHandle1 != INVALID_HANDLE) IndicatorRelease(emaHandle1);
+    if(emaHandle2 != INVALID_HANDLE) IndicatorRelease(emaHandle2);
+    
+    Print("Inside Bar EA deinitialized");
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    // Check for new bar
+    datetime currentBarTime = iTime(_Symbol, _Period, 0);
+    if (currentBarTime == lastBarTime)
+    {
+        // Check for breakout entries on every tick if inside bar was detected
+        if(insideBarDetected)
+        {
+            CheckBreakoutEntry();
+        }
+        return; // Same bar, no need to check pattern again
+    }
+    
+    lastBarTime = currentBarTime;
+    insideBarDetected = false;
+    
+    // We need at least 2 bars to detect inside bar pattern
+    if (Bars(_Symbol, _Period) < 2)
+        return;
+    
+    // Get price data using the specified reference methods
+    double open1   = iOpen(_Symbol, _Period, 1);
+    double open2   = iOpen(_Symbol, _Period, 2);
+    double close1  = iClose(_Symbol, _Period, 1);
+    double close2  = iClose(_Symbol, _Period, 2);
+    double low1    = iLow(_Symbol, _Period, 1);
+    double low2    = iLow(_Symbol, _Period, 2);
+    double high1   = iHigh(_Symbol, _Period, 1);
+    double high2   = iHigh(_Symbol, _Period, 2);
+    
+    // Check if bar 1 is an inside bar of bar 2 (mother bar)
+    if (IsInsideBar(open2, high2, low2, close2,  // Mother bar (bar 2)
+                    open1, high1, low1, close1))  // Current bar (bar 1, potential inside bar)
+    {
+        motherHigh = high2;
+        motherLow = low2;
+        insideBarDetected = true;
+        
+        DrawMotherBarRange(2, motherHigh, motherLow, iTime(_Symbol, _Period, 2));
+        
+        if (AlertOnInsideBar)
+        {
+            Alert("Inside Bar Detected on ", Symbol(), " ", PeriodToString(), " - Time: ", TimeToString(TimeCurrent()));
+        }
+        
+        // Process the inside bar pattern
+        ProcessInsideBarPattern(open2, high2, low2, close2, open1, high1, low1, close1);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check for breakout entry conditions                             |
+//+------------------------------------------------------------------+
+void CheckBreakoutEntry()
+{
+    if(!insideBarDetected || !EnableTrading) return;
+    
+    // Get current price
+    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    
+    // Get EMA values
+    double ema20[], ema50[];
+    CopyBuffer(emaHandle1,MAIN_LINE,1,2, ema20);
+    CopyBuffer(emaHandle2, MAIN_LINE,1,2, ema50);
+    
+    if(ArraySize(ema20) < 1 || ArraySize(ema50) < 1) return;
+    
+    // Determine trend direction
+    bool bullishTrend = (ema20[1] > ema50[1]);
+    bool bearishTrend = (ema20[1] < ema50[1]);
+    
+    // Check if we already have a position
+    if(PositionSelect(_Symbol))
+    {
+        Print("Position already exists for ", _Symbol);
+        return;
+    }
+    
+    // Buy condition: Bullish trend and price breaks above mother bar high
+    if(bullishTrend && currentPrice > motherHigh)
+    {
+        ExecuteBuyTrade();
+        insideBarDetected = false; // Reset after trade execution
+    }
+    // Sell condition: Bearish trend and price breaks below mother bar low
+    else if(bearishTrend && currentBid < motherLow)
+    {
+        ExecuteSellTrade();
+        insideBarDetected = false; // Reset after trade execution
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Execute buy trade                                               |
+//+------------------------------------------------------------------+
+void ExecuteBuyTrade()
+{
+    double entryPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double stopLoss = motherLow;
+    double takeProfit = entryPrice + (entryPrice - stopLoss) * RiskRewardRatio;
+    
+    // Calculate point value
+    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    double spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * point;
+    
+    // Adjust stop loss and take profit for digit precision
+    stopLoss = NormalizeDouble(stopLoss, _Digits);
+    takeProfit = NormalizeDouble(takeProfit, _Digits);
+    
+    MqlTradeRequest request = {};
+    MqlTradeResult result = {};
+    
+    ZeroMemory(request);
+    ZeroMemory(result);
+    
+    request.action = TRADE_ACTION_DEAL;
+    request.symbol = _Symbol;
+    request.volume = LotSize;
+    request.type = ORDER_TYPE_BUY;
+    request.price = entryPrice;
+    request.sl = stopLoss;
+    request.tp = takeProfit;
+    request.deviation = 10;
+    request.magic = 12345;
+    request.comment = "InsideBar Buy";
+    
+    if(OrderSend(request, result))
+    {
+        Print("Buy order executed. Entry: ", entryPrice, " SL: ", stopLoss, " TP: ", takeProfit);
+        Print("Trend: Bullish (EMA20 > EMA50)");
+    }
+    else
+    {
+        Print("Error executing buy order: ", GetLastError());
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Execute sell trade                                              |
+//+------------------------------------------------------------------+
+void ExecuteSellTrade()
+{
+    double entryPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double stopLoss = motherHigh;
+    double takeProfit = entryPrice - (stopLoss - entryPrice) * RiskRewardRatio;
+    
+    // Normalize prices
+    stopLoss = NormalizeDouble(stopLoss, _Digits);
+    takeProfit = NormalizeDouble(takeProfit, _Digits);
+    
+    MqlTradeRequest request = {};
+    MqlTradeResult result = {};
+    
+    ZeroMemory(request);
+    ZeroMemory(result);
+    
+    request.action = TRADE_ACTION_DEAL;
+    request.symbol = _Symbol;
+    request.volume = LotSize;
+    request.type = ORDER_TYPE_SELL;
+    request.price = entryPrice;
+    request.sl = stopLoss;
+    request.tp = takeProfit;
+    request.deviation = 10;
+    request.magic = 12345;
+    request.comment = "InsideBar Sell";
+    
+    if(OrderSend(request, result))
+    {
+        Print("Sell order executed. Entry: ", entryPrice, " SL: ", stopLoss, " TP: ", takeProfit);
+        Print("Trend: Bearish (EMA20 < EMA50)");
+    }
+    else
+    {
+        Print("Error executing sell order: ", GetLastError());
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check if current bar is inside bar of mother bar                 |
+//+------------------------------------------------------------------+
+bool IsInsideBar(double motherOpen, double motherHigh, double motherLow, double motherClose,
+                 double currentOpen, double currentHigh, double currentLow, double currentClose)
+{
+    // Check if current bar's high is lower than mother bar's high
+    // and current bar's low is higher than mother bar's low
+    if (currentHigh < motherHigh && currentLow > motherLow)
+    {
+        return true;
+    }
+    
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Draw mother bar range on chart                                   |
+//+------------------------------------------------------------------+
+void DrawMotherBarRange(int barIndex, double motherHigh, double motherLow, datetime barTime)
+{
+    string highLineName = StringFormat("%s_MotherHigh_%d", indicatorName, barIndex);
+    string lowLineName = StringFormat("%s_MotherLow_%d", indicatorName, barIndex);
+    
+    // Remove existing lines first to avoid duplicates
+    ObjectDelete(0, highLineName);
+    ObjectDelete(0, lowLineName);
+    
+    // Draw mother bar high line
+    if (!ObjectCreate(0, highLineName, OBJ_HLINE, 0, 0, motherHigh))
+    {
+        Print("Error creating high line: ", GetLastError());
+    }
+    else
+    {
+        ObjectSetInteger(0, highLineName, OBJPROP_COLOR, MotherBarHighColor);
+        ObjectSetInteger(0, highLineName, OBJPROP_WIDTH, LineWidth);
+        ObjectSetInteger(0, highLineName, OBJPROP_STYLE, LineStyle);
+        ObjectSetInteger(0, highLineName, OBJPROP_BACK, true);
+    }
+    
+    // Draw mother bar low line
+    if (!ObjectCreate(0, lowLineName, OBJ_HLINE, 0, 0, motherLow))
+    {
+        Print("Error creating low line: ", GetLastError());
+    }
+    else
+    {
+        ObjectSetInteger(0, lowLineName, OBJPROP_COLOR, MotherBarLowColor);
+        ObjectSetInteger(0, lowLineName, OBJPROP_WIDTH, LineWidth);
+        ObjectSetInteger(0, lowLineName, OBJPROP_STYLE, LineStyle);
+        ObjectSetInteger(0, lowLineName, OBJPROP_BACK, true);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Process inside bar pattern for trading decisions                |
+//+------------------------------------------------------------------+
+void ProcessInsideBarPattern(double motherOpen, double motherHigh, double motherLow, double motherClose,
+                             double insideOpen, double insideHigh, double insideLow, double insideClose)
+{
+    // Determine if mother bar is bullish or bearish
+    bool motherBullish = (motherClose > motherOpen);
+    bool motherBearish = (motherClose < motherOpen);
+    
+    // Determine if inside bar is bullish or bearish
+    bool insideBullish = (insideClose > insideOpen);
+    bool insideBearish = (insideClose < insideOpen);
+    
+    Print("Inside Bar Pattern Detected:");
+    Print("Mother Bar: ", (motherBullish ? "Bullish" : (motherBearish ? "Bearish" : "Doji")), 
+          " | High: ", motherHigh, " | Low: ", motherLow);
+    Print("Inside Bar: ", (insideBullish ? "Bullish" : (insideBearish ? "Bearish" : "Doji")),
+          " | High: ", insideHigh, " | Low: ", insideLow);
+    
+    // Get EMA values for trend analysis
+    double ema20[], ema50[];
+    CopyBuffer(emaHandle1, 0, 0, 3, ema20);
+    CopyBuffer(emaHandle2, 0, 0, 3, ema50);
+    
+    if(ArraySize(ema20) > 0 && ArraySize(ema50) > 0)
+    {
+        bool bullishTrend = (ema20[0] > ema50[0]);
+        bool bearishTrend = (ema20[0] < ema50[0]);
+        
+        Print("Trend Analysis - EMA20: ", ema20[0], " EMA50: ", ema50[0]);
+        Print("Trend Direction: ", (bullishTrend ? "BULLISH" : (bearishTrend ? "BEARISH" : "NEUTRAL")));
+        
+        if(bullishTrend)
+        {
+            Print("Waiting for BUY signal - Price > ", motherHigh);
+        }
+        else if(bearishTrend)
+        {
+            Print("Waiting for SELL signal - Price < ", motherLow);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Convert period to string                                         |
+//+------------------------------------------------------------------+
+string PeriodToString()
+{
+    switch(_Period)
+    {
+        case PERIOD_M1: return "M1";
+        case PERIOD_M2: return "M2";
+        case PERIOD_M3: return "M3";
+        case PERIOD_M4: return "M4";
+        case PERIOD_M5: return "M5";
+        case PERIOD_M6: return "M6";
+        case PERIOD_M10: return "M10";
+        case PERIOD_M12: return "M12";
+        case PERIOD_M15: return "M15";
+        case PERIOD_M20: return "M20";
+        case PERIOD_M30: return "M30";
+        case PERIOD_H1: return "H1";
+        case PERIOD_H2: return "H2";
+        case PERIOD_H3: return "H3";
+        case PERIOD_H4: return "H4";
+        case PERIOD_H6: return "H6";
+        case PERIOD_H8: return "H8";
+        case PERIOD_H12: return "H12";
+        case PERIOD_D1: return "D1";
+        case PERIOD_W1: return "W1";
+        case PERIOD_MN1: return "MN1";
+        default: return "Unknown";
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Chart event handler                                              |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+{
+    // Handle chart events if needed
+}
