@@ -1,0 +1,353 @@
+//+------------------------------------------------------------------+
+//|                                               TwoCandleSystem.mq5|
+//|                                 Copyright 2023, MetaQuotes Ltd.  |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2023, MetaQuotes Ltd."
+#property link      "https://www.mql5.com"
+#property version   "1.01"
+
+input ulong  MagicNumber = 12345;   // Magic Number
+input double LotSize     = 0.1;     // Lot Size
+input int    TakeProfit1 = 200;     // First Take Profit in points
+input int    TakeProfit2 = 400;     // Second Take Profit in points
+input int    StopLoss    = 400;     // Stop Loss in points
+input double NegativePnLThreshold = -100.0; // Close position if PnL <= -100 USD
+input bool   UseBreakeven = true;   // Enable breakeven after first TP
+input int    BreakevenTrigger = 150; // Points profit to trigger breakeven
+
+int emaSlowHandle;
+bool firstTPHit = false;
+
+#include <Trade/Trade.mqh>
+CTrade trade;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   emaSlowHandle = iMA(_Symbol, PERIOD_CURRENT, 200, 0, MODE_EMA, PRICE_CLOSE);
+   return(INIT_SUCCEEDED);
+  }
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   IndicatorRelease(emaSlowHandle);
+  }
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+   // Check for minimum number of bars
+   if(Bars(_Symbol, PERIOD_CURRENT) < 3)
+     {
+      Print("Not enough historical data");
+      return;
+     }
+
+   // Check if already traded today
+   string globalVarName = "LastTradeDate_" + string(MagicNumber) + "_" + Symbol();
+   datetime lastTradeDate = GlobalVariableGet(globalVarName);
+   datetime currentDate = TimeCurrent() / 86400 * 86400; // Get midnight of current day
+   
+   if(lastTradeDate >= currentDate)
+     {
+      Print("Already traded today. Skipping new trades.");
+     }
+   else
+     {
+      // Get candle data
+      double firstCandleOpen = iOpen(_Symbol, PERIOD_CURRENT, 1);
+      double firstCandleClose = iClose(_Symbol, PERIOD_CURRENT, 1);
+      double firstCandleHigh = iHigh(_Symbol, PERIOD_CURRENT, 1);
+      double firstCandleLow = iLow(_Symbol, PERIOD_CURRENT, 1);
+
+      double secondCandleOpen = iOpen(_Symbol, PERIOD_CURRENT, 2);
+      double secondCandleClose = iClose(_Symbol, PERIOD_CURRENT, 2);
+      double secondCandleHigh = iHigh(_Symbol, PERIOD_CURRENT, 2);
+      double secondCandleLow = iLow(_Symbol, PERIOD_CURRENT, 2);
+
+      //EMA DATA
+      double ema200[];
+      CopyBuffer(emaSlowHandle, 0, 1, 2, ema200);
+      
+      //Trend
+      bool uptrend = firstCandleClose > ema200[0]; 
+      bool downtrend = firstCandleClose < ema200[0]; 
+      
+      // Check candle conditions
+      bool isSecondCandleBearish = secondCandleClose < secondCandleOpen;
+      bool isSecondCandleBullish = secondCandleClose > secondCandleOpen;
+      bool isFirstCandleBullish = firstCandleClose > firstCandleOpen;
+      bool isFirstCandleBearish = firstCandleClose < firstCandleOpen;
+      
+      // check sell condition
+      bool checksellbar = firstCandleClose < secondCandleClose && firstCandleLow < secondCandleLow && firstCandleHigh > secondCandleClose && firstCandleHigh > secondCandleHigh;
+      bool checkbuybar = firstCandleClose > secondCandleClose && firstCandleLow < secondCandleLow && firstCandleHigh > secondCandleClose && firstCandleHigh > secondCandleHigh;
+
+      // Get current price
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+      // Check buy condition
+      if(uptrend && checkbuybar && ask > firstCandleHigh && !HasOpenPosition())
+        {
+         double sl = ask - StopLoss * _Point;
+         double tp1 = ask + TakeProfit1 * _Point;
+         double tp2 = ask + TakeProfit2 * _Point;
+         if(OpenTrade(ORDER_TYPE_BUY, ask, sl, tp1, tp2))
+            GlobalVariableSet(globalVarName, currentDate);
+        }
+      
+      // Check sell condition
+      if(downtrend && checksellbar && bid < firstCandleLow && !HasOpenPosition())
+        {
+         double sl = bid + StopLoss * _Point;
+         double tp1 = bid - TakeProfit1 * _Point;
+         double tp2 = bid - TakeProfit2 * _Point;
+         //if(OpenTrade(ORDER_TYPE_SELL, bid, sl, tp1, tp2))
+            //GlobalVariableSet(globalVarName, currentDate);
+        }
+     }
+     
+   // Manage open positions for breakeven and partial closing
+   ManageOpenPositions();
+     
+   // Check for open positions and close if PnL <= NegativePnLThreshold
+   //CheckAndCloseNegativePnL();
+  }
+
+//+------------------------------------------------------------------+
+//| Manage open positions for breakeven and partial closing         |
+//+------------------------------------------------------------------+
+void ManageOpenPositions()
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+        {
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
+            PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+           {
+            ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            double currentSL = PositionGetDouble(POSITION_SL);
+            double currentTP = PositionGetDouble(POSITION_TP);
+            double currentPrice = (posType == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            double profitPoints = 0;
+            
+            // Calculate profit in points
+            if(posType == POSITION_TYPE_BUY)
+               profitPoints = (currentPrice - openPrice) / _Point;
+            else
+               profitPoints = (openPrice - currentPrice) / _Point;
+            
+            // Check if first TP is hit (profit >= TakeProfit1 points)
+            if(profitPoints >= TakeProfit1 && currentTP == openPrice + TakeProfit2 * _Point * (posType == POSITION_TYPE_BUY ? 1 : -1))
+              {
+               // Close half position for first TP
+               ClosePartialPosition(ticket, 0.5);
+               Print("First Take Profit hit. Closing 50% of position.");
+               
+               // Set breakeven stop loss
+               if(UseBreakeven)
+                 {
+                  double breakevenSL = openPrice;
+                  ModifyStopLoss(ticket, breakevenSL);
+                  Print("Moving stop loss to breakeven: ", breakevenSL);
+                 }
+              }
+            
+            // Check for breakeven trigger (profit >= BreakevenTrigger points)
+            if(UseBreakeven && profitPoints >= BreakevenTrigger && 
+               ((posType == POSITION_TYPE_BUY && currentSL < openPrice) || 
+                (posType == POSITION_TYPE_SELL && currentSL > openPrice)))
+              {
+               double breakevenSL = openPrice;
+               ModifyStopLoss(ticket, breakevenSL);
+               Print("Breakeven triggered. Moving stop loss to: ", breakevenSL);
+              }
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Close partial position                                          |
+//+------------------------------------------------------------------+
+bool ClosePartialPosition(ulong ticket, double percentage)
+  {
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   
+   if(!PositionSelectByTicket(ticket)) return false;
+   
+   double volume = PositionGetDouble(POSITION_VOLUME);
+   double closeVolume = NormalizeDouble(volume * percentage, 2);
+   
+   if(closeVolume < SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN))
+     {
+      Print("Close volume too small. Minimum: ", SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN));
+      return false;
+     }
+   
+   request.action = TRADE_ACTION_DEAL;
+   request.position = ticket;
+   request.symbol = _Symbol;
+   request.volume = closeVolume;
+   request.type = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+   request.price = (request.type == ORDER_TYPE_SELL) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   request.deviation = 5;
+   request.magic = MagicNumber;
+   
+   if(!OrderSend(request, result))
+     {
+      Print("Failed to close partial position: ", GetLastError());
+      return false;
+     }
+   
+   Print("Partial close executed. Volume: ", closeVolume, " Ticket: ", ticket);
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Modify stop loss of a position                                  |
+//+------------------------------------------------------------------+
+bool ModifyStopLoss(ulong ticket, double newStopLoss)
+  {
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   
+   if(!PositionSelectByTicket(ticket)) return false;
+   
+   request.action = TRADE_ACTION_SLTP;
+   request.position = ticket;
+   request.symbol = _Symbol;
+   request.sl = NormalizeDouble(newStopLoss, _Digits);
+   request.tp = PositionGetDouble(POSITION_TP); // Keep existing TP
+   request.magic = MagicNumber;
+   
+   if(!OrderSend(request, result))
+     {
+      Print("ModifyStopLoss failed for ticket ", ticket, ". Error: ", GetLastError());
+      return false;
+     }
+   
+   Print("Stop loss modified for ticket ", ticket, ". New SL: ", request.sl);
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Check if there's any open position                               |
+//+------------------------------------------------------------------+
+bool HasOpenPosition()
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+        {
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
+            PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+           {
+            return true;
+           }
+        }
+     }
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Execute trade order with two take profits                       |
+//+------------------------------------------------------------------+
+bool OpenTrade(const ENUM_ORDER_TYPE orderType, const double price, const double sl, const double tp1, const double tp2)
+  {
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = LotSize;
+   request.type = orderType;
+   request.price = price;
+   request.deviation = 5;
+   request.magic = MagicNumber;
+
+   // Set initial stop loss and second take profit
+   // First TP will be handled by partial close in ManageOpenPositions()
+   request.sl = NormalizeDouble(sl, _Digits);
+   request.tp = NormalizeDouble(tp2, _Digits); // Set TP2 as final target
+
+   // Send trade request
+   if(!OrderSend(request, result))
+     {
+      Print("OrderSend failed: ", GetLastError());
+      return false;
+     }
+   
+   Print("Trade opened: ", EnumToString(orderType), 
+         " Price: ", price, 
+         " SL: ", request.sl, 
+         " TP1: ", tp1, 
+         " TP2: ", request.tp);
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Check and close positions with negative PnL                     |
+//+------------------------------------------------------------------+
+void CheckAndCloseNegativePnL()
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+        {
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
+            PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+           {
+            double pnl = PositionGetDouble(POSITION_PROFIT);
+            if(pnl <= NegativePnLThreshold)
+              {
+               ClosePosition(ticket);
+              }
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Close a position by ticket                                       |
+//+------------------------------------------------------------------+
+void ClosePosition(const ulong ticket)
+  {
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+
+   request.action = TRADE_ACTION_DEAL;
+   request.position = ticket;
+   request.symbol = _Symbol;
+   request.volume = PositionGetDouble(POSITION_VOLUME);
+   request.type = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+   request.price = (request.type == ORDER_TYPE_SELL) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   request.deviation = 5;
+   request.magic = MagicNumber;
+
+   // Send close request
+   if(!OrderSend(request, result))
+     {
+      Print("Failed to close position: ", GetLastError());
+     }
+   else
+     {
+      Print("Position closed due to negative PnL. Ticket: ", ticket);
+     }
+  }
+//+------------------------------------------------------------------+
