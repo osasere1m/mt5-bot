@@ -1,0 +1,567 @@
+ //+------------------------------------------------------------------+
+//|                                            MultiRSI_Reversion.mq5|
+//|                                      Copyright 2024, YourName    |
+//|                                              https://www.mql5.com|
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2024, YourName"
+#property link      "https://www.mql5.com"
+#property version   "1.00"
+
+// Input parameters
+input int      RSI_Period1 = 2;            // Fast RSI Period
+input int      RSI_Period2 = 14;           // Slow RSI Period
+input int      OverboughtLevel = 70;       // Overbought Level
+input int      OversoldLevel = 30;         // Oversold Level
+input double   LotSize = 0.1;              // Lot Size
+input int      MagicNumber = 12345;        // Magic Number
+input int      Slippage = 5;               // Slippage in points
+input string   TradeComment = "RSI_Reversion"; // Trade Comment
+input bool     TradeOnNewBar = true;       // Trade only on new bar
+input bool     CloseOnOppositeSignal = true; // Close on opposite signal
+input bool     UseTrailingStop = false;    // Use trailing stop
+input int      TrailingStopPoints = 100;   // Trailing Stop Points
+input int      BreakevenPoints = 50;       // Breakeven Points
+input int      EMA_Period2 = 50;                       // EMA 50 period
+input ENUM_DAY_OF_WEEK NoTradeDay = MONDAY;  // Day to avoid trading
+input double NegativePnLThreshold = -100.0; // Close position if PnL <= -100 USD
+
+// Global variables
+int rsiHandle1, rsiHandle2, emaHandle2;
+double rsiBuffer1[], rsiBuffer2[];
+ulong lastBarTime = 0;
+ENUM_TIMEFRAMES currentTimeframe;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   // Get current chart timeframe
+   currentTimeframe = (ENUM_TIMEFRAMES)_Period;
+   
+   // Initialize RSI indicators
+   rsiHandle1 = iRSI(_Symbol, currentTimeframe, RSI_Period1, PRICE_CLOSE);
+   rsiHandle2 = iRSI(_Symbol, currentTimeframe, RSI_Period2, PRICE_CLOSE);
+   emaHandle2 = iMA(_Symbol, _Period, EMA_Period2, 0, MODE_EMA, PRICE_CLOSE);
+    
+   
+   if(rsiHandle1 == INVALID_HANDLE || rsiHandle2 == INVALID_HANDLE)
+   {
+      Print("Error creating RSI indicators");
+      return(INIT_FAILED);
+   }
+   
+   // Set indicator buffers
+   ArraySetAsSeries(rsiBuffer1, true);
+   ArraySetAsSeries(rsiBuffer2, true);
+   
+   // Check trading permissions
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+   {
+      Print("Trading is not allowed!");
+      return(INIT_FAILED);
+   }
+   
+   // Draw indicator label
+   ObjectCreate(0, "EA_Label", OBJ_LABEL, 0, 0, 0);
+   ObjectSetString(0, "EA_Label", OBJPROP_TEXT, "Multi-RSI Reversion");
+   ObjectSetInteger(0, "EA_Label", OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0, "EA_Label", OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(0, "EA_Label", OBJPROP_YDISTANCE, 20);
+   ObjectSetInteger(0, "EA_Label", OBJPROP_COLOR, clrWhite);
+   ObjectSetInteger(0, "EA_Label", OBJPROP_FONTSIZE, 10);
+   
+   Print("Multi-RSI Mean Reversion EA initialized on ", EnumToString(currentTimeframe), " timeframe");
+   
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   if(rsiHandle1 != INVALID_HANDLE)
+      IndicatorRelease(rsiHandle1);
+   if(rsiHandle2 != INVALID_HANDLE)
+      IndicatorRelease(rsiHandle2);
+   
+   // Clean up objects
+   ObjectDelete(0, "EA_Label");
+   ObjectsDeleteAll(0, "Signal_");
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   // Check for new bar if enabled
+   if(TradeOnNewBar && !IsNewBar())
+      return;
+   
+   // Get RSI values
+   if(CopyBuffer(rsiHandle1, 0, 0, 3, rsiBuffer1) < 3 ||
+      CopyBuffer(rsiHandle2, 0, 0, 3, rsiBuffer2) < 3)
+   {
+      Print("Error copying RSI buffers");
+      return;
+   }
+   IsTradingAllowed();
+   CheckAndCloseNegativePnL();
+   
+   // Current RSI values
+   double rsi1_current = rsiBuffer1[0];     // Current fast RSI
+   double rsi1_prev = rsiBuffer1[1];        // Previous fast RSI
+   double rsi2_current = rsiBuffer2[0];     // Current slow RSI
+   double rsi2_prev = rsiBuffer2[1];        // Previous slow RSI
+   
+   // Check exit conditions first (to close existing positions if exit signal occurs)
+   CheckExitConditions(rsi2_current);
+   
+   // Check entry conditions (only if no position exists)
+   if(!HasOpenPosition())
+   {
+      CheckEntryConditions(rsi1_prev, rsi2_prev);
+   }
+   
+   // Manage trailing stops if enabled
+   if(UseTrailingStop)
+   {
+      ManageTrailingStops();
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check if new bar has formed                                      |
+//+------------------------------------------------------------------+
+bool IsNewBar()
+{
+   datetime currentTime = iTime(_Symbol, currentTimeframe, 0);
+   
+   if(currentTime != lastBarTime)
+   {
+      lastBarTime = currentTime;
+      return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Check if trading is allowed today                                |
+//+------------------------------------------------------------------+
+bool IsTradingAllowed()
+{
+   // Get current server time
+   datetime currentTime = TimeCurrent();
+   MqlDateTime dtStruct;
+   TimeToStruct(currentTime, dtStruct);
+   
+   // Check if today is the no-trade day
+   if(dtStruct.day_of_week == NoTradeDay)
+   {
+      Print("No trading today - ", EnumToString(NoTradeDay));
+      return false;
+   }
+   
+   return true;
+}
+//+------------------------------------------------------------------+
+//| Check if there's an open position                                |
+//+------------------------------------------------------------------+
+bool HasOpenPosition()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(PositionGetSymbol(i) == _Symbol && PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+      {
+         return true;
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Check entry conditions                                           |
+//+------------------------------------------------------------------+
+void CheckEntryConditions(double rsi1_prev, double rsi2_prev)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   
+   if(CopyRates(_Symbol, currentTimeframe, 0, 2, rates) < 2)
+      return;
+   
+   double openPrice = rates[0].open;  // Open price of current bar
+   
+   // BUY SETUP: RSI2 < 30 AND RSI14 > 50
+   if(rsi1_prev < OversoldLevel && rsi2_prev > 50)
+   {
+      OpenBuyOrder(openPrice);
+      DrawSignal("Signal_Buy_" + TimeToString(rates[0].time), rates[0].time, 
+                 rates[0].low, clrLimeGreen, "BUY");
+   }
+   
+   // SELL SETUP: RSI2 > 70 AND RSI14 < 50
+   if(rsi1_prev > OverboughtLevel && rsi2_prev < 50)
+   {
+      //OpenSellOrder(openPrice);
+      DrawSignal("Signal_Sell_" + TimeToString(rates[0].time), rates[0].time, 
+                 rates[0].high, clrRed, "SELL");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check exit conditions                                            |
+//+------------------------------------------------------------------+
+void CheckExitConditions(double rsi2_current)
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(PositionGetSymbol(i) != _Symbol || PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+      
+      ulong ticket = PositionGetTicket(i);
+      ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      
+      
+      double ema50[];
+      //CopyBuffer(emaHandle1,MAIN_LINE,1,2, ema20);
+      CopyBuffer(emaHandle2, MAIN_LINE,1,2, ema50);
+      
+      // Close BUY position when RSI14 > 70
+      if(posType == POSITION_TYPE_BUY && rsi2_current > OverboughtLevel)
+      {
+         ClosePosition(ticket, "RSI14 > 70");
+      }
+      // Close SELL position when RSI14 < 30
+      else if(posType == POSITION_TYPE_SELL && rsi2_current < OversoldLevel)
+      {
+         ClosePosition(ticket, "RSI14 < 30");
+      }
+   }
+}
+
+
+//+------------------------------------------------------------------+
+//| Check and close positions with negative PnL                     |
+//+------------------------------------------------------------------+
+void CheckAndCloseNegativePnL()
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+        {
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
+            PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+           {
+            double pnl = PositionGetDouble(POSITION_PROFIT);
+            if(pnl <= NegativePnLThreshold)
+              {
+               ClosePosition(ticket);
+              }
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Close a position by ticket                                       |
+//+------------------------------------------------------------------+
+void ClosePosition(const ulong ticket)
+  {
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+
+   request.action = TRADE_ACTION_DEAL;
+   request.position = ticket;
+   request.symbol = PositionGetString(POSITION_SYMBOL);
+   request.volume = PositionGetDouble(POSITION_VOLUME);
+   request.type = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+   request.price = (request.type == ORDER_TYPE_SELL) ? SymbolInfoDouble(request.symbol, SYMBOL_BID) : SymbolInfoDouble(request.symbol, SYMBOL_ASK);
+   request.deviation = 5;
+   request.magic = MagicNumber;
+
+   // Send close request
+   if(!OrderSend(request, result))
+     {
+      Print("Failed to close position: ", GetLastError());
+     }
+  }
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Open buy order                                                   |
+//+------------------------------------------------------------------+
+bool OpenBuyOrder(double entryPrice)
+{
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   
+   double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   
+   // Use the next bar's open price if specified
+   if(entryPrice > 0 && entryPrice < price)
+   {
+      price = entryPrice;
+   }
+   
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = LotSize;
+   request.type = ORDER_TYPE_BUY;
+   request.price = price;
+   request.deviation = Slippage;
+   request.magic = MagicNumber;
+   request.comment = TradeComment + " (BUY - RSI2<30 & RSI14>50)";
+   request.type_filling = ORDER_FILLING_FOK;
+   
+   if(!OrderSend(request, result))
+   {
+      Print("Buy order failed. Error: ", GetLastError());
+      return false;
+   }
+   
+   Print("BUY order opened at: ", price, 
+         " - RSI Conditions: RSI2<30 & RSI14>50");
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Open sell order                                                  |
+//+------------------------------------------------------------------+
+bool OpenSellOrder(double entryPrice)
+{
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   
+   double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   // Use the next bar's open price if specified
+   if(entryPrice > 0 && entryPrice > price)
+   {
+      price = entryPrice;
+   }
+   
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = LotSize;
+   request.type = ORDER_TYPE_SELL;
+   request.price = price;
+   request.deviation = Slippage;
+   request.magic = MagicNumber;
+   request.comment = TradeComment + " (SELL - RSI2>70 & RSI14<50)";
+   request.type_filling = ORDER_FILLING_FOK;
+   
+   if(!OrderSend(request, result))
+   {
+      Print("Sell order failed. Error: ", GetLastError());
+      return false;
+   }
+   
+   Print("SELL order opened at: ", price, 
+         " - RSI Conditions: RSI2>70 & RSI14<50");
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Close position                                                   |
+//+------------------------------------------------------------------+
+void ClosePosition(ulong ticket, string reason)
+{
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   
+   if(!PositionSelectByTicket(ticket))
+      return;
+   
+   ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+   double price = (posType == POSITION_TYPE_BUY) ? 
+                  SymbolInfoDouble(_Symbol, SYMBOL_BID) : 
+                  SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   
+   request.action = TRADE_ACTION_DEAL;
+   request.position = ticket;
+   request.symbol = _Symbol;
+   request.volume = PositionGetDouble(POSITION_VOLUME);
+   request.type = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+   request.price = price;
+   request.deviation = Slippage;
+   request.magic = MagicNumber;
+   request.comment = "Close - " + reason;
+   request.type_filling = ORDER_FILLING_FOK;
+   
+   if(!OrderSend(request, result))
+   {
+      Print("Failed to close position ", ticket, ". Error: ", GetLastError());
+   }
+   else
+   {
+      Print("Position closed: ", ticket, " - Reason: ", reason);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Manage trailing stops                                            |
+//+------------------------------------------------------------------+
+void ManageTrailingStops()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(PositionGetSymbol(i) != _Symbol || PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+      
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      
+      double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double currentSL = PositionGetDouble(POSITION_SL);
+      
+      if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+      {
+         double profitPoints = (currentPrice - openPrice) / _Point;
+         
+         // Move to breakeven
+         if(profitPoints >= BreakevenPoints && (currentSL < openPrice || currentSL == 0))
+         {
+            ModifyStopLoss(ticket, openPrice);
+         }
+         // Start trailing
+         else if(profitPoints >= TrailingStopPoints)
+         {
+            double newSL = currentPrice - (TrailingStopPoints * _Point);
+            if(newSL > MathMax(currentSL, openPrice))
+            {
+               ModifyStopLoss(ticket, newSL);
+            }
+         }
+      }
+      else if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
+      {
+         double profitPoints = (openPrice - currentPrice) / _Point;
+         
+         // Move to breakeven
+         if(profitPoints >= BreakevenPoints && (currentSL > openPrice || currentSL == 0))
+         {
+            ModifyStopLoss(ticket, openPrice);
+         }
+         // Start trailing
+         else if(profitPoints >= TrailingStopPoints)
+         {
+            double newSL = currentPrice + (TrailingStopPoints * _Point);
+            if(newSL < MathMin(currentSL, openPrice) || currentSL == 0)
+            {
+               ModifyStopLoss(ticket, newSL);
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Modify stop loss                                                 |
+//+------------------------------------------------------------------+
+bool ModifyStopLoss(ulong ticket, double newSL)
+{
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   
+   if(!PositionSelectByTicket(ticket))
+      return false;
+   
+   double currentTP = PositionGetDouble(POSITION_TP);
+   
+   request.action = TRADE_ACTION_SLTP;
+   request.position = ticket;
+   request.symbol = _Symbol;
+   request.sl = NormalizeDouble(newSL, _Digits);
+   request.tp = NormalizeDouble(currentTP, _Digits);
+   request.magic = MagicNumber;
+   
+   if(!OrderSend(request, result))
+   {
+      Print("Failed to modify SL for ticket ", ticket, ". Error: ", GetLastError());
+      return false;
+   }
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Draw signal on chart                                             |
+//+------------------------------------------------------------------+
+void DrawSignal(string name, datetime barTime, double price, color clr, string text)
+{
+   // Delete existing object with same name
+   ObjectDelete(0, name);
+   
+   // Create arrow object
+   int arrowCode = (clr == clrLimeGreen) ? 233 : 234; // Up arrow for buy, down for sell
+   ObjectCreate(0, name, OBJ_ARROW, 0, barTime, price);
+   ObjectSetInteger(0, name, OBJPROP_ARROWCODE, arrowCode);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, name, OBJPROP_BACK, true);
+   
+   // Create label
+   string labelName = name + "_Label";
+   ObjectDelete(0, labelName);
+   ObjectCreate(0, labelName, OBJ_TEXT, 0, barTime, 
+                price + ((clr == clrLimeGreen) ? -10*_Point : 10*_Point));
+   ObjectSetString(0, labelName, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, labelName, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, labelName, OBJPROP_BACK, true);
+}
+
+//+------------------------------------------------------------------+
+//| Display RSI values on chart (for debugging)                      |
+//+------------------------------------------------------------------+
+void DisplayRSIValues()
+{
+   if(CopyBuffer(rsiHandle1, 0, 0, 2, rsiBuffer1) < 2 ||
+      CopyBuffer(rsiHandle2, 0, 0, 2, rsiBuffer2) < 2)
+      return;
+   
+   string text = StringFormat("RSI%d: %.2f | RSI%d: %.2f", 
+                              RSI_Period1, rsiBuffer1[0], 
+                              RSI_Period2, rsiBuffer2[0]);
+   
+   ObjectCreate(0, "RSI_Display", OBJ_LABEL, 0, 0, 0);
+   ObjectSetString(0, "RSI_Display", OBJPROP_TEXT, text);
+   ObjectSetInteger(0, "RSI_Display", OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, "RSI_Display", OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(0, "RSI_Display", OBJPROP_YDISTANCE, 40);
+   ObjectSetInteger(0, "RSI_Display", OBJPROP_COLOR, clrYellow);
+   ObjectSetInteger(0, "RSI_Display", OBJPROP_FONTSIZE, 10);
+}
+
+//+------------------------------------------------------------------+
+//| Manual check functions (for testing)                             |
+//+------------------------------------------------------------------+
+bool CheckBuySignal()
+{
+   if(CopyBuffer(rsiHandle1, 0, 0, 2, rsiBuffer1) < 2 ||
+      CopyBuffer(rsiHandle2, 0, 0, 2, rsiBuffer2) < 2)
+      return false;
+   
+   double rsi1_prev = rsiBuffer1[1];
+   double rsi2_prev = rsiBuffer2[1];
+   
+   return (rsi1_prev < OversoldLevel && rsi2_prev > 50);
+}
+
+bool CheckSellSignal()
+{
+   if(CopyBuffer(rsiHandle1, 0, 0, 2, rsiBuffer1) < 2 ||
+      CopyBuffer(rsiHandle2, 0, 0, 2, rsiBuffer2) < 2)
+      return false;
+   
+   double rsi1_prev = rsiBuffer1[1];
+   double rsi2_prev = rsiBuffer2[1];
+   
+   return (rsi1_prev > OverboughtLevel && rsi2_prev < 50);
+}
