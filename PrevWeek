@@ -1,0 +1,354 @@
+//+------------------------------------------------------------------+
+//|                                               WeeklyTradeStrategy|
+//|                                 Copyright 2024, MetaQuotes Ltd. |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2024, MetaQuotes Ltd."
+#property link      "https://www.mql5.com"
+#property version   "1.03"
+
+input ulong  MagicNumber = 153;      // Magic Number
+input double LotSize     = 0.1;      // Lot Size
+input int    StopLoss    = 400;      // Stop Loss (points)
+input int    TakeProfit  = 800;      // Take Profit (points)
+input color  HighLineColor = clrRed; // Previous Week High line color
+input color  LowLineColor = clrBlue; // Previous Week Low line color
+input int    LineWidth = 2;          // Line width
+input ENUM_LINE_STYLE LineStyle = STYLE_SOLID; // Line style
+
+// Global variable for tracking weekly trades
+datetime lastTradeWeek = 0;
+double lastPrevWeekHigh = 0;
+double lastPrevWeekLow = 0;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   // Initialize global variable for last trade week
+   string globalVarName = "LastTradeWeek_" + string(MagicNumber) + "_" + Symbol();
+   lastTradeWeek = (datetime)GlobalVariableGet(globalVarName);
+   
+   // Clean up old global variables (optional)
+   CleanupOldGlobalVars();
+   
+   // Clean up old chart objects on initialization
+   CleanupChartObjects();
+   
+   Print("Weekly Trade Strategy Initialized. Last trade week: ", TimeToString(lastTradeWeek));
+   
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   // Clean up on deinitialization
+   CleanupOldGlobalVars();
+   
+   // Optional: Remove chart objects on deinit
+   // Comment out if you want lines to remain on chart
+   // CleanupChartObjects();
+}
+
+//+------------------------------------------------------------------+
+//| Clean up old global variables                                    |
+//+------------------------------------------------------------------+
+void CleanupOldGlobalVars()
+{
+   string prefix = "LastTradeDate_" + string(MagicNumber) + "_";
+   int total = GlobalVariablesTotal();
+   
+   for(int i = total-1; i >= 0; i--)
+   {
+      string name = GlobalVariableName(i);
+      if(StringFind(name, prefix) == 0)
+      {
+         GlobalVariableDel(name);
+         Print("Deleted old global variable: ", name);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Clean up chart objects                                           |
+//+------------------------------------------------------------------+
+void CleanupChartObjects()
+{
+   // Remove only our EA's chart objects
+   ObjectsDeleteAll(0, "PrevWeekHigh_");
+   ObjectsDeleteAll(0, "PrevWeekLow_");
+   ObjectsDeleteAll(0, "PrevWeekHigh_Label");
+   ObjectsDeleteAll(0, "PrevWeekLow_Label");
+   Print("Cleaned up chart objects");
+}
+
+//+------------------------------------------------------------------+
+//| Get start of the week (Monday 00:00)                            |
+//+------------------------------------------------------------------+
+datetime GetStartOfWeek(datetime time)
+{
+   MqlDateTime dt;
+   TimeToStruct(time, dt);
+   
+   // Calculate days to subtract to get Monday
+   int daysToMonday = dt.day_of_week - 1;
+   if(daysToMonday < 0) daysToMonday = 6; // Sunday case
+   
+   dt.hour = 0;
+   dt.min = 0;
+   dt.sec = 0;
+   datetime midnight = StructToTime(dt);
+   
+   return midnight - (daysToMonday * 86400);
+}
+
+//+------------------------------------------------------------------+
+//| Draw horizontal line on chart                                    |
+//+------------------------------------------------------------------+
+void DrawHorizontalLine(string name, double price, color lineColor, string label = "")
+{
+   // Delete existing line with same name
+   ObjectDelete(0, name);
+   
+   // Create horizontal line
+   ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, lineColor);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, LineStyle);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, LineWidth);
+   ObjectSetInteger(0, name, OBJPROP_BACK, true);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, false);
+   
+   // Add label if provided
+   if(label != "")
+   {
+      string labelName = name + "_Label";
+      ObjectDelete(0, labelName);
+      ObjectCreate(0, labelName, OBJ_TEXT, 0, TimeCurrent() + PeriodSeconds(PERIOD_D1) * 5, price);
+      ObjectSetString(0, labelName, OBJPROP_TEXT, label);
+      ObjectSetInteger(0, labelName, OBJPROP_COLOR, lineColor);
+      ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 10);
+      ObjectSetInteger(0, labelName, OBJPROP_BACK, true);
+      ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   // Check for minimum number of bars
+   if(Bars(_Symbol, PERIOD_W1) < 2)
+   {
+      Print("Not enough historical data");
+      return;
+   }
+
+   // Get previous week's high and low
+   double prevWeekHigh = iHigh(_Symbol, PERIOD_W1, 1);
+   double prevWeekLow = iLow(_Symbol, PERIOD_W1, 1);
+   
+   // Draw lines if they've changed
+   if(prevWeekHigh != lastPrevWeekHigh)
+   {
+      DrawHorizontalLine("PrevWeekHigh_" + Symbol(), 
+                        prevWeekHigh, 
+                        HighLineColor,
+                        "Prev Week High: " + DoubleToString(prevWeekHigh, _Digits));
+      lastPrevWeekHigh = prevWeekHigh;
+   }
+   
+   if(prevWeekLow != lastPrevWeekLow)
+   {
+      DrawHorizontalLine("PrevWeekLow_" + Symbol(), 
+                        prevWeekLow, 
+                        LowLineColor,
+                        "Prev Week Low: " + DoubleToString(prevWeekLow, _Digits));
+      lastPrevWeekLow = prevWeekLow;
+   }
+
+   // Check if already traded this week
+   datetime currentWeekStart = GetStartOfWeek(TimeCurrent());
+   
+   if(lastTradeWeek >= currentWeekStart)
+   {
+      // Already traded this week, just check if we need to update any closed positions
+      CheckForClosedPositions();
+      return;
+   }
+
+   // Get additional hourly data for entry conditions
+   double prevhourclose = iClose(_Symbol, PERIOD_H1, 1);
+   double prevhourhigh = iHigh(_Symbol, PERIOD_H1, 1);
+   double prevhourlow = iLow(_Symbol, PERIOD_H1, 1);
+   double prev2barclose = iClose(_Symbol, PERIOD_H1, 2);
+   
+   // Entry conditions
+   bool entry = prevhourclose > prevWeekHigh && prevhourhigh > prevWeekHigh && prevhourlow < prevWeekHigh; 
+   bool confirm = prev2barclose < prevWeekHigh;
+   
+   // Get current prices
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   // Check buy condition - price breaks above previous week's high
+   if(ask > prevWeekHigh && entry && confirm && !HasOpenPosition())
+   {
+      Print("Buy signal detected: Current Ask(", ask, ") > Previous Week High(", prevWeekHigh, ")");
+      Print("Entry conditions: entry=", entry, " confirm=", confirm);
+      
+      if(OpenTrade(ORDER_TYPE_BUY, ask))
+      {
+         // Record trade week
+         lastTradeWeek = currentWeekStart;
+         string globalVarName = "LastTradeWeek_" + string(MagicNumber) + "_" + Symbol();
+         GlobalVariableSet(globalVarName, lastTradeWeek);
+         
+         Print("Trade opened successfully for week starting: ", TimeToString(currentWeekStart));
+         
+         // Optional: Change line color when trade is taken
+         ObjectSetInteger(0, "PrevWeekHigh_" + Symbol(), OBJPROP_COLOR, clrLimeGreen);
+      }
+   }
+
+   // Check sell condition - price breaks below previous week's low
+   if(bid < prevWeekLow && !HasOpenPosition())
+   {
+      Print("Sell signal detected: Current Bid(", bid, ") < Previous Week Low(", prevWeekLow, ")");
+      
+      //if(OpenTrade(ORDER_TYPE_SELL, bid))
+      //{
+         // Record trade week
+         //lastTradeWeek = currentWeekStart;
+         //string globalVarName = "LastTradeWeek_" + string(MagicNumber) + "_" + Symbol();
+         //GlobalVariableSet(globalVarName, lastTradeWeek);
+         
+         //Print("Trade opened successfully for week starting: ", TimeToString(currentWeekStart));
+         
+         // Optional: Change line color when trade is taken
+         //ObjectSetInteger(0, "PrevWeekLow_" + Symbol(), OBJPROP_COLOR, clrOrangeRed);
+      //}
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check for closed positions to reset weekly trade counter         |
+//+------------------------------------------------------------------+
+void CheckForClosedPositions()
+{
+   // This function can be enhanced to reset the counter if all positions are closed
+   // Currently, the logic prevents new trades until next week regardless of position status
+   
+   static int lastPositionCount = 0;
+   int currentPositionCount = PositionsTotal();
+   
+   // If we had positions and now we don't, positions were closed
+   if(lastPositionCount > 0 && currentPositionCount == 0)
+   {
+      Print("All positions closed. Ready for new trade next week.");
+      
+      // Reset line colors when positions are closed
+      ObjectSetInteger(0, "PrevWeekHigh_" + Symbol(), OBJPROP_COLOR, HighLineColor);
+      ObjectSetInteger(0, "PrevWeekLow_" + Symbol(), OBJPROP_COLOR, LowLineColor);
+   }
+   
+   lastPositionCount = currentPositionCount;
+}
+
+//+------------------------------------------------------------------+
+//| Check if there's any open position                               |
+//+------------------------------------------------------------------+
+bool HasOpenPosition()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+      {
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
+            PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+         {
+            return true;
+         }
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Execute trade order                                              |
+//+------------------------------------------------------------------+
+bool OpenTrade(const ENUM_ORDER_TYPE orderType, const double price)
+{
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = LotSize;
+   request.type = orderType;
+   request.price = price;
+   request.deviation = 5;
+   request.magic = MagicNumber;
+   request.comment = "WeeklyTrade_" + TimeToString(GetStartOfWeek(TimeCurrent()), TIME_DATE);
+
+   // Calculate stop loss and take profit
+   if(StopLoss > 0)
+   {
+      if(orderType == ORDER_TYPE_BUY)
+         request.sl = NormalizeDouble(price - StopLoss * _Point, _Digits);
+      else
+         request.sl = NormalizeDouble(price + StopLoss * _Point, _Digits);
+   }
+
+   if(TakeProfit > 0)
+   {
+      if(orderType == ORDER_TYPE_BUY)
+         request.tp = NormalizeDouble(price + TakeProfit * _Point, _Digits);
+      else
+         request.tp = NormalizeDouble(price - TakeProfit * _Point, _Digits);
+   }
+
+   // Send trade request
+   if(!OrderSend(request, result))
+   {
+      Print("OrderSend failed: ", GetLastError());
+      return false;
+   }
+   
+   Print("Trade opened: ", 
+         (orderType == ORDER_TYPE_BUY ? "BUY" : "SELL"), 
+         " at ", price, 
+         " SL: ", request.sl, 
+         " TP: ", request.tp,
+         " Ticket: ", result.order);
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Timer function (optional - can be enabled if needed)             |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+   // Optional: Check weekly rollover
+   datetime currentWeekStart = GetStartOfWeek(TimeCurrent());
+   
+   // If it's a new week and we have no positions, reset the trade counter
+   if(currentWeekStart > lastTradeWeek && !HasOpenPosition())
+   {
+      lastTradeWeek = 0;
+      string globalVarName = "LastTradeWeek_" + string(MagicNumber) + "_" + Symbol();
+      GlobalVariableSet(globalVarName, 0);
+      Print("New week started. Trade counter reset.");
+      
+      // Update lines for new week
+      lastPrevWeekHigh = 0;
+      lastPrevWeekLow = 0;
+   }
+}
