@@ -1,0 +1,261 @@
+//+------------------------------------------------------------------+
+//|                                               DailyHLStrategy.mq5|
+//|                                 Copyright 2023, MetaQuotes Ltd. |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2023, MetaQuotes Ltd."
+#property link      "https://www.mql5.com"
+#property version   "1.02"
+
+input ulong  MagicNumber = 12345;   // Magic Number
+input double LotSize     = 0.1;     // Lot Size
+input int    StopLoss    = 400;     // Stop Loss (points)
+input int    TakeProfit  = 800;     // Take Profit (points)
+
+// Global variables to track daily trade status
+enum ENUM_TRADE_STATUS
+{
+   TRADE_STATUS_NONE = 0,      // No trade yet today
+   TRADE_STATUS_ACTIVE = 1,    // Trade is active
+   TRADE_STATUS_CLOSED_TP = 2, // Trade closed by TP (no second trade allowed)
+   TRADE_STATUS_CLOSED_SL = 3  // Trade closed by SL (second trade allowed)
+};
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   // Initialize or reset the daily status variable
+   string statusVarName = "TradeStatus_" + string(MagicNumber) + "_" + Symbol();
+   if(GlobalVariableCheck(statusVarName) == false)
+      GlobalVariableSet(statusVarName, TRADE_STATUS_NONE);
+   
+   return(INIT_SUCCEEDED);
+  }
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   // Clean up global variables when EA is removed
+   if(reason == REASON_REMOVE)
+     {
+      string statusVarName = "TradeStatus_" + string(MagicNumber) + "_" + Symbol();
+      GlobalVariableDel(statusVarName);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+   // Check for minimum number of bars
+   if(Bars(_Symbol, PERIOD_D1) < 2)
+     {
+      Print("Not enough historical data");
+      return;
+     }
+
+   // Get current date and status
+   datetime currentDate = TimeCurrent() / 86400 * 86400; // Get midnight of current day
+   string dateVarName = "LastTradeDate_" + string(MagicNumber) + "_" + Symbol();
+   string statusVarName = "TradeStatus_" + string(MagicNumber) + "_" + Symbol();
+   
+   datetime lastTradeDate = GlobalVariableGet(dateVarName);
+   int tradeStatus = (int)GlobalVariableGet(statusVarName);
+   
+   // Reset status for new day
+   if(lastTradeDate < currentDate)
+     {
+      tradeStatus = TRADE_STATUS_NONE;
+      GlobalVariableSet(statusVarName, TRADE_STATUS_NONE);
+     }
+   
+   // Check if we can trade today based on status
+   if(tradeStatus == TRADE_STATUS_CLOSED_TP)
+     {
+      Print("Trade closed with TP today. No more trades allowed.");
+      return;
+     }
+   
+   // Check if there's an open position
+   bool hasOpenPos = HasOpenPosition();
+   
+   // Update status if position was closed
+   if(tradeStatus == TRADE_STATUS_ACTIVE && !hasOpenPos)
+     {
+      // Check the closed position result by looking at history
+      ENUM_TRADE_STATUS closeResult = CheckClosedPositionResult();
+      
+      if(closeResult == TRADE_STATUS_CLOSED_TP)
+        {
+         tradeStatus = TRADE_STATUS_CLOSED_TP;
+         GlobalVariableSet(statusVarName, TRADE_STATUS_CLOSED_TP);
+         Print("First trade closed with TP. No more trades today.");
+         return;
+        }
+      else if(closeResult == TRADE_STATUS_CLOSED_SL)
+        {
+         tradeStatus = TRADE_STATUS_CLOSED_SL;
+         GlobalVariableSet(statusVarName, TRADE_STATUS_CLOSED_SL);
+         Print("First trade closed with SL. Second trade allowed.");
+        }
+     }
+   
+   // If we already have an active trade or we've already traded and it wasn't closed by SL, don't open new trade
+   if(hasOpenPos)
+     {
+      if(tradeStatus == TRADE_STATUS_NONE)
+        {
+         tradeStatus = TRADE_STATUS_ACTIVE;
+         GlobalVariableSet(statusVarName, TRADE_STATUS_ACTIVE);
+        }
+      return;
+     }
+   
+   // If trade status is CLOSED_SL, we've already had one trade and can open a second
+   // If trade status is NONE, we haven't traded yet today
+   if(tradeStatus == TRADE_STATUS_CLOSED_SL || tradeStatus == TRADE_STATUS_NONE)
+     {
+      // Get previous day's high and low
+      double prevHigh = iHigh(_Symbol, PERIOD_D1, 1);
+      double prevLow = iLow(_Symbol, PERIOD_D1, 1);
+      
+      // Get current prices
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+      // Check buy condition
+      if(ask > prevHigh)
+        {
+         if(OpenTrade(ORDER_TYPE_BUY, ask))
+           {
+            GlobalVariableSet(dateVarName, currentDate);
+            GlobalVariableSet(statusVarName, TRADE_STATUS_ACTIVE);
+            Print("Buy trade opened. Status set to ACTIVE.");
+            return;
+           }
+        }
+
+      // Check sell condition
+      if(bid < prevLow)
+        {
+         if(OpenTrade(ORDER_TYPE_SELL, bid))
+           {
+            GlobalVariableSet(dateVarName, currentDate);
+            GlobalVariableSet(statusVarName, TRADE_STATUS_ACTIVE);
+            Print("Sell trade opened. Status set to ACTIVE.");
+            return;
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Check if there's any open position                               |
+//+------------------------------------------------------------------+
+bool HasOpenPosition()
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+        {
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
+            PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+           {
+            return true;
+           }
+        }
+     }
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Check the result of the closed position                          |
+//+------------------------------------------------------------------+
+ENUM_TRADE_STATUS CheckClosedPositionResult()
+  {
+   datetime currentDate = TimeCurrent() / 86400 * 86400;
+   datetime lastTradeDate = GlobalVariableGet("LastTradeDate_" + string(MagicNumber) + "_" + Symbol());
+   
+   // Get today's closed positions from history
+   if(HistorySelect(lastTradeDate, TimeCurrent()))
+     {
+      int totalDeals = HistoryDealsTotal();
+      
+      for(int i = totalDeals - 1; i >= 0; i--)
+        {
+         ulong ticket = HistoryDealGetTicket(i);
+         if(HistoryDealGetInteger(ticket, DEAL_MAGIC) == MagicNumber &&
+            HistoryDealGetString(ticket, DEAL_SYMBOL) == _Symbol &&
+            HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_OUT)
+           {
+            // Check profit/loss to determine if it was closed by TP or SL
+            double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+            double swap = HistoryDealGetDouble(ticket, DEAL_SWAP);
+            double commission = HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+            double totalProfit = profit + swap + commission;
+            
+            // If the trade was profitable, assume it hit TP (since our strategy uses TP/SL)
+            if(totalProfit > 0)
+              {
+               return TRADE_STATUS_CLOSED_TP;
+              }
+            else
+              {
+               return TRADE_STATUS_CLOSED_SL;
+              }
+           }
+        }
+     }
+   
+   // Default return if no closed position found
+   return TRADE_STATUS_NONE;
+  }
+
+//+------------------------------------------------------------------+
+//| Execute trade order                                              |
+//+------------------------------------------------------------------+
+bool OpenTrade(const ENUM_ORDER_TYPE orderType, const double price)
+  {
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = LotSize;
+   request.type = orderType;
+   request.price = price;
+   request.deviation = 5;
+   request.magic = MagicNumber;
+
+   // Calculate stop loss and take profit
+   if(StopLoss > 0)
+     {
+      if(orderType == ORDER_TYPE_BUY)
+         request.sl = NormalizeDouble(price - StopLoss * _Point, _Digits);
+      else
+         request.sl = NormalizeDouble(price + StopLoss * _Point, _Digits);
+     }
+
+   if(TakeProfit > 0)
+     {
+      if(orderType == ORDER_TYPE_BUY)
+         request.tp = NormalizeDouble(price + TakeProfit * _Point, _Digits);
+      else
+         request.tp = NormalizeDouble(price - TakeProfit * _Point, _Digits);
+     }
+
+   // Send trade request
+   if(!OrderSend(request, result))
+     {
+      Print("OrderSend failed: ", GetLastError());
+      return false;
+     }
+   return true;
+  }
+//+------------------------------------------------------------------+
