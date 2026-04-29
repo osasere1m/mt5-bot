@@ -1,0 +1,246 @@
+//+------------------------------------------------------------------+
+//|                                               DailyHLStrategy.mq5|
+//|                                 Copyright 2023, MetaQuotes Ltd. |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2023, MetaQuotes Ltd."
+#property link      "https://www.mql5.com"
+#property version   "1.02"
+
+input ulong  MagicNumber = 12345;   // Magic Number
+input double LotSize     = 0.1;     // Lot Size
+input int    StopLoss    = 2000;     // Stop Loss (points)
+input int    TakeProfit  = 4000;     // Take Profit (points)
+input bool   SkipMonday   = true;    // Skip trading on Monday
+input bool   SkipTuesday  = false;   // Skip trading on Tuesday
+input bool   SkipWednesday = false;  // Skip trading on Wednesday
+input bool   SkipThursday = false;   // Skip trading on Thursday
+input bool   SkipFriday   = false;   // Skip trading on Friday
+input bool   SkipSaturday = false;   // Skip trading on Saturday
+input bool   SkipSunday   = true;   // Skip trading on Sunday
+
+int handle_DSmma;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   handle_DSmma = iMA(_Symbol, PERIOD_CURRENT, 50, 0, MODE_SMA, PRICE_CLOSE);
+   if(handle_DSmma == INVALID_HANDLE)
+     {
+      Print("Failed to create SMMA handle");
+      return INIT_FAILED;
+     }
+   return(INIT_SUCCEEDED);
+  }
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   if(handle_DSmma != INVALID_HANDLE)
+      IndicatorRelease(handle_DSmma);
+  }
+
+//+------------------------------------------------------------------+
+//| Check if trading is allowed on current day                       |
+//+------------------------------------------------------------------+
+bool IsTradingAllowedOnCurrentDay()
+  {
+   MqlDateTime currentDateTime;
+   TimeToStruct(TimeCurrent(), currentDateTime);
+   
+   int dayOfWeek = currentDateTime.day_of_week; // 0=Sunday, 1=Monday, ..., 6=Saturday
+   
+   switch(dayOfWeek)
+     {
+      case 0: // Sunday
+         return !SkipSunday;
+      case 1: // Monday
+         return !SkipMonday;
+      case 2: // Tuesday
+         return !SkipTuesday;
+      case 3: // Wednesday
+         return !SkipWednesday;
+      case 4: // Thursday
+         return !SkipThursday;
+      case 5: // Friday
+         return !SkipFriday;
+      case 6: // Saturday
+         return !SkipSaturday;
+      default:
+         return true;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Get day name for logging                                         |
+//+------------------------------------------------------------------+
+string GetDayName(int dayOfWeek)
+  {
+   switch(dayOfWeek)
+     {
+      case 0: return "Sunday";
+      case 1: return "Monday";
+      case 2: return "Tuesday";
+      case 3: return "Wednesday";
+      case 4: return "Thursday";
+      case 5: return "Friday";
+      case 6: return "Saturday";
+      default: return "Unknown";
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+   // Check for minimum number of bars
+   if(Bars(_Symbol, PERIOD_D1) < 2)
+     {
+      Print("Not enough historical data");
+      return;
+     }
+
+   // Check if trading is allowed on current day
+   if(!IsTradingAllowedOnCurrentDay())
+     {
+      MqlDateTime currentDateTime;
+      TimeToStruct(TimeCurrent(), currentDateTime);
+      static datetime lastPrintedTime = 0;
+      
+      // Print message once per day to avoid spamming
+      if(TimeCurrent() - lastPrintedTime > 3600)
+        {
+         Print("Trading not allowed on ", GetDayName(currentDateTime.day_of_week), ". Skipping new trades.");
+         lastPrintedTime = TimeCurrent();
+        }
+      return;
+     }
+
+   // Check if already traded today
+   string globalVarName = "LastTradeDate_" + string(MagicNumber) + "_" + Symbol();
+   datetime lastTradeDate = GlobalVariableGet(globalVarName);
+   datetime currentDate = TimeCurrent() / 86400 * 86400; // Get midnight of current day
+   
+   if(lastTradeDate >= currentDate)
+     {
+      Print("Already traded today. Skipping new trades.");
+      return;
+     }
+
+   // Get previous day's high and low
+   double prevHigh = iHigh(_Symbol, PERIOD_D1, 1);
+   double prevLow = iLow(_Symbol, PERIOD_D1, 1);
+   double secondHigh = iHigh(_Symbol, PERIOD_D1, 2);
+   double secondLow = iLow(_Symbol, PERIOD_D1, 2);
+   // Get previous day's high and low
+   double prevdayClose = iClose(_Symbol,PERIOD_D1,1);
+   
+   //Daily trend direcion
+   
+      
+   
+   // Get current prices
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   // Get previous day's close and SMMA
+   //double prevdayClose = iClose(_Symbol, PERIOD_D1, 1);
+   double DAILY_SMMA[];
+   CopyBuffer(handle_DSmma,MAIN_LINE,1,2,DAILY_SMMA);
+   
+   // Daily trend direction
+   bool buyentry = (prevHigh < secondHigh && prevHigh > DAILY_SMMA[1] && secondHigh > DAILY_SMMA[1]);
+   bool sellentry = (prevLow > secondLow && prevLow < DAILY_SMMA[1] && secondLow < DAILY_SMMA[1]);
+   
+   
+   // Check buy condition
+   if(ask > prevHigh && buyentry && !HasOpenPosition())
+     {
+      if(OpenTrade(ORDER_TYPE_BUY, ask))
+         GlobalVariableSet(globalVarName, currentDate);
+     }
+
+   // Check sell condition
+   if(bid < prevLow && sellentry && !HasOpenPosition())
+     {
+      if(OpenTrade(ORDER_TYPE_SELL, bid))
+         GlobalVariableSet(globalVarName, currentDate);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Check if there's any open position                               |
+//+------------------------------------------------------------------+
+bool HasOpenPosition()
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+        {
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
+            PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+           {
+            return true;
+           }
+        }
+     }
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Execute trade order                                              |
+//+------------------------------------------------------------------+
+bool OpenTrade(const ENUM_ORDER_TYPE orderType, const double price)
+  {
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = LotSize;
+   request.type = orderType;
+   request.price = price;
+   request.deviation = 5;
+   request.magic = MagicNumber;
+
+   // Calculate stop loss and take profit
+   if(StopLoss > 0)
+     {
+      if(orderType == ORDER_TYPE_BUY)
+         request.sl = NormalizeDouble(price - StopLoss * _Point, _Digits);
+      else
+         request.sl = NormalizeDouble(price + StopLoss * _Point, _Digits);
+     }
+
+   if(TakeProfit > 0)
+     {
+      if(orderType == ORDER_TYPE_BUY)
+         request.tp = NormalizeDouble(price + TakeProfit * _Point, _Digits);
+      else
+         request.tp = NormalizeDouble(price - TakeProfit * _Point, _Digits);
+     }
+
+   // Send trade request
+   if(!OrderSend(request, result))
+     {
+      Print("OrderSend failed: ", GetLastError());
+      return false;
+     }
+   
+   // Log the trade with day information
+   MqlDateTime currentDateTime;
+   TimeToStruct(TimeCurrent(), currentDateTime);
+   Print("Trade opened on ", GetDayName(currentDateTime.day_of_week), 
+         " | Ticket: ", result.order,
+         " | Type: ", (orderType == ORDER_TYPE_BUY ? "BUY" : "SELL"),
+         " | Price: ", price);
+   
+   return true;
+  }
+//+------------------------------------------------------------------+
